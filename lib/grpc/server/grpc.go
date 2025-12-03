@@ -1,0 +1,135 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"path/filepath"
+
+	"github.com/eviltomorrow/futures/lib/certificate"
+	"github.com/eviltomorrow/futures/lib/finalizer"
+	"github.com/eviltomorrow/futures/lib/grpc/middleware"
+	"github.com/eviltomorrow/futures/lib/netutil"
+	"github.com/eviltomorrow/futures/lib/system"
+	"github.com/eviltomorrow/futures/lib/zlog"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection"
+)
+
+type GRPC struct {
+	network *netutil.Config
+
+	server     *grpc.Server
+	ctx        context.Context
+	cancel     func()
+	revokeFunc func() error
+
+	RegisteredAPI []func(*grpc.Server)
+}
+
+func NewGRPC(network *netutil.Config, supported ...func(*grpc.Server)) *GRPC {
+	return &GRPC{
+		network: network,
+
+		RegisteredAPI: supported,
+	}
+}
+
+func (g *GRPC) Serve() error {
+	g.ctx, g.cancel = context.WithCancel(context.Background())
+
+	midlog, err := middleware.InitLogger(&zlog.Config{
+		Level:  "info",
+		Format: "json",
+		File: zlog.FileLogConfig{
+			Filename:    filepath.Join(system.Directory.LogDir(), "access.log"),
+			MaxSize:     100,
+			MaxDays:     30,
+			MaxBackups:  90,
+			Compression: "gzip",
+		},
+		DisableStacktrace: true,
+		DisableStdlog:     true,
+	})
+	if err != nil {
+		return fmt.Errorf("init middleware log failure, nest error: %v", err)
+	}
+	finalizer.RegisterCleanupFuncs(finalizer.NamedFunc{Name: "Sync gRPC access.log", Fn: midlog})
+
+	var creds credentials.TransportCredentials
+	if !g.network.DisableTLS {
+		ipList := make([]string, 0, 4)
+		ipList = append(ipList, system.Network.BindIP())
+		ipList = append(ipList, g.network.BindIP)
+		if system.Network.AccessIP() == "" {
+			ipList = append(ipList, system.Network.AccessIP())
+		}
+
+		err := certificate.CreateOrOverrideFile(certificate.BuildDefaultAppInfo(ipList), &certificate.Config{
+			// CaCertFile:     filepath.Join(system.Directory.UsrDir(), "certs/ca.crt"),
+			// CaKeyFile:      filepath.Join(system.Directory.UsrDir(), "certs/ca.key"),
+			// ClientCertFile: filepath.Join(system.Directory.VarDir, "certs/client.crt"),
+			// ClientKeyFile:  filepath.Join(system.Directory.VarDir, "certs/client.pem"),
+			// ServerCertFile: filepath.Join(system.Directory.VarDir, "certs/server.crt"),
+			// ServerKeyFile:  filepath.Join(system.Directory.VarDir, "certs/server.pem"),
+		})
+		if err != nil {
+			return err
+		}
+
+		creds, err = certificate.LoadServerCredentials(&certificate.Config{
+			CaCertFile:     filepath.Join(system.Directory.UsrDir(), "certs/ca.crt"),
+			ServerCertFile: filepath.Join(system.Directory.VarDir(), "certs/server.crt"),
+			ServerKeyFile:  filepath.Join(system.Directory.VarDir(), "certs/server.pem"),
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	listen, err := net.Listen("tcp", fmt.Sprintf("%s:%d", g.network.BindIP, g.network.BindPort))
+	if err != nil {
+		return err
+	}
+
+	g.server = grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			middleware.UnaryServerRecoveryInterceptor,
+			middleware.UnaryServerLogInterceptor,
+		),
+		grpc.ChainStreamInterceptor(
+			middleware.StreamServerRecoveryInterceptor,
+			// middleware.StreamServerLogInterceptor,
+		),
+		grpc.Creds(creds),
+	)
+
+	reflection.Register(g.server)
+	for _, register := range g.RegisteredAPI {
+		register(g.server)
+	}
+
+	go func() {
+		if err := g.server.Serve(listen); err != nil {
+			zlog.Fatal("server(grpc) startup failure", zap.Error(err))
+		}
+	}()
+
+	return nil
+}
+
+func (g *GRPC) Stop() error {
+	if g.revokeFunc != nil {
+		g.revokeFunc()
+	}
+	if g.server != nil {
+		g.server.GracefulStop()
+	}
+	if g.cancel != nil {
+		g.cancel()
+	}
+
+	return nil
+}
