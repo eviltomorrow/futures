@@ -23,11 +23,12 @@ type Workspace struct {
 }
 
 type Log struct {
-	Level         string `json:"level" toml:"level" mapstructure:"level"`
-	MaxSize       int    `json:"max_size" toml:"max-size" mapstructure:"max-size"`
-	MaxDays       int    `json:"max_days" toml:"max-days" mapstructure:"max-days"`
-	MaxBackups    int    `json:"max_backups" toml:"max-backups" mapstructure:"max-backups"`
-	DisableStdlog bool   `json:"disable_stdlog" toml:"disable-stdlog" mapstructure:"disable-stdlog"`
+	DisableStdlog bool `json:"disable_stdlog" toml:"disable-stdlog" mapstructure:"disable-stdlog"`
+	MaxSize       int  `json:"max_size" toml:"max-size" mapstructure:"max-size"`
+	MaxDays       int  `json:"max_days" toml:"max-days" mapstructure:"max-days"`
+	MaxBackups    int  `json:"max_backups" toml:"max-backups" mapstructure:"max-backups"`
+
+	Level string `json:"level" toml:"level" mapstructure:"level"`
 }
 
 type IP struct {
